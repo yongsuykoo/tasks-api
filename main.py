@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Optional, List
 from datetime import datetime
 import os
 
@@ -59,23 +59,19 @@ class TaskResponse(TaskBase):
         from_attributes = True
 
 class TaskListResponse(BaseModel):
-    tasks: List[TaskResponse]
     total: int
-
-class MessageResponse(BaseModel):
-    message: str
-    id: Optional[int] = None
+    tasks: List[TaskResponse]
 
 # FastAPI App
 app = FastAPI(
     title="Tasks API",
-    description="A complete REST API for managing tasks - Built by Yongskie 🇵🇭",
+    description="A complete REST API for managing tasks. Built by Yongskie with FastAPI + SQLite.",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# CORS Middleware
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,30 +89,40 @@ def get_db():
         db.close()
 
 # Root endpoint
-@app.get("/", tags=["Root"])
+@app.get("/", tags=["Health"])
 def root():
     return {
         "message": "Welcome to Tasks API! 🚀",
         "docs": "/docs",
-        "endpoints": {
-            "list_tasks": "GET /tasks",
-            "get_task": "GET /tasks/{id}",
-            "create_task": "POST /tasks",
-            "update_task": "PUT /tasks/{id}",
-            "delete_task": "DELETE /tasks/{id}"
-        }
+        "version": "1.0.0",
+        "author": "Yongskie"
     }
 
-# GET /tasks - List all tasks
+# Health check
+@app.get("/health", tags=["Health"])
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+# CREATE - POST /tasks
+@app.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED, tags=["Tasks"])
+def create_task(task: TaskCreate, db: Session = Depends(get_db)):
+    """Create a new task."""
+    db_task = TaskModel(**task.model_dump())
+    db.add(db_task)
+    db.commit()
+    db.refresh(db_task)
+    return db_task
+
+# READ ALL - GET /tasks
 @app.get("/tasks", response_model=TaskListResponse, tags=["Tasks"])
-def list_tasks(
+def get_tasks(
     skip: int = 0,
     limit: int = 100,
     completed: Optional[bool] = None,
     priority: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """Retrieve all tasks with optional filtering."""
+    """Get all tasks with optional filtering."""
     query = db.query(TaskModel)
     
     if completed is not None:
@@ -127,40 +133,26 @@ def list_tasks(
     total = query.count()
     tasks = query.offset(skip).limit(limit).all()
     
-    return {"tasks": tasks, "total": total}
+    return {"total": total, "tasks": tasks}
 
-# GET /tasks/{id} - Get task by ID
+# READ ONE - GET /tasks/{id}
 @app.get("/tasks/{task_id}", response_model=TaskResponse, tags=["Tasks"])
 def get_task(task_id: int, db: Session = Depends(get_db)):
-    """Retrieve a specific task by ID."""
+    """Get a specific task by ID."""
     task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-    
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task with id {task_id} not found"
         )
-    
     return task
 
-# POST /tasks - Create new task
-@app.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED, tags=["Tasks"])
-def create_task(task: TaskCreate, db: Session = Depends(get_db)):
-    """Create a new task."""
-    db_task = TaskModel(**task.model_dump())
-    db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
-    
-    return db_task
-
-# PUT /tasks/{id} - Update task
+# UPDATE - PUT /tasks/{id}
 @app.put("/tasks/{task_id}", response_model=TaskResponse, tags=["Tasks"])
 def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get_db)):
     """Update an existing task."""
-    db_task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-    
-    if not db_task:
+    task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
+    if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task with id {task_id} not found"
@@ -168,31 +160,31 @@ def update_task(task_id: int, task_update: TaskUpdate, db: Session = Depends(get
     
     update_data = task_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
-        setattr(db_task, field, value)
+        setattr(task, field, value)
     
     db.commit()
-    db.refresh(db_task)
-    
-    return db_task
+    db.refresh(task)
+    return task
 
-# DELETE /tasks/{id} - Delete task
-@app.delete("/tasks/{task_id}", response_model=MessageResponse, tags=["Tasks"])
+# DELETE - DELETE /tasks/{id}
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tasks"])
 def delete_task(task_id: int, db: Session = Depends(get_db)):
     """Delete a task."""
-    db_task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-    
-    if not db_task:
+    task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
+    if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task with id {task_id} not found"
         )
     
-    db.delete(db_task)
+    db.delete(task)
     db.commit()
-    
-    return {"message": f"Task {task_id} deleted successfully", "id": task_id}
+    return None
 
-# Health check
-@app.get("/health", tags=["Health"])
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+# Batch operations
+@app.delete("/tasks", status_code=status.HTTP_200_OK, tags=["Tasks"])
+def delete_completed_tasks(db: Session = Depends(get_db)):
+    """Delete all completed tasks."""
+    deleted = db.query(TaskModel).filter(TaskModel.completed == True).delete()
+    db.commit()
+    return {"message": f"Deleted {deleted} completed tasks"}
